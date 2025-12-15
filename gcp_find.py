@@ -23,6 +23,8 @@ from numpy.linalg import norm
 import matplotlib.pyplot as plt
 import cv2
 from cv2 import aruco
+import xml.etree.ElementTree as ET
+from collections import defaultdict
 
 # handle incompatibility introduced in openCV 4.8
 if packaging.version.parse(cv2.__version__) < packaging.version.parse('4.8'):
@@ -230,6 +232,47 @@ class GcpFind():
             #plt.legend()
             plt.show()
 
+    def gcp_output_micmac(self, foutput):
+        """ output GCPs in MicMac XML format
+        
+            :param foutput: output file handle
+        """
+        # Group GCPs by image
+        gcps_by_image = defaultdict(list)
+        for gcp in self.gcps:
+            j = gcp[3]  # marker ID
+            if len(self.gcp_found[j]) <= self.args.limit:
+                image_name = gcp[2]  # image filename
+                x = float(gcp[0])
+                y = float(gcp[1])
+                gcps_by_image[image_name].append((j, x, y))
+            else:
+                print(f"GCP {j} over limit it is dropped", file=sys.stderr)
+        
+        # Create XML structure
+        root = ET.Element('SetOfMesureAppuisFlottants')
+        
+        # Sort images by name for consistent output
+        for image_name in sorted(gcps_by_image.keys()):
+            image_elem = ET.SubElement(root, 'MesureAppuiFlottant1Im')
+            name_im = ET.SubElement(image_elem, 'NameIm')
+            name_im.text = image_name
+            
+            # Sort GCPs by ID for consistent output
+            for marker_id, x, y in sorted(gcps_by_image[image_name], key=lambda t: t[0]):
+                measure_elem = ET.SubElement(image_elem, 'OneMesureAF1I')
+                name_pt = ET.SubElement(measure_elem, 'NamePt')
+                name_pt.text = str(marker_id)
+                pt_im = ET.SubElement(measure_elem, 'PtIm')
+                # Format coordinates with high precision as in MicMac format
+                pt_im.text = f"{x:.14f} {y:.14f}"
+        
+        # Write XML to file
+        tree = ET.ElementTree(root)
+        ET.indent(tree, space="     ")
+        foutput.write('<?xml version="1.0" ?>\n')
+        tree.write(foutput, encoding='unicode', xml_declaration=False)
+
     def gcp_output(self):
         """ output GPCs to output file """
         if self.args.output == sys.stdout:
@@ -284,6 +327,9 @@ class GcpFind():
                         print(f"GCP {j} over limit it is dropped on image {gcp[2]}", file=sys.stderr)
                 else:
                     print(f"No coordinates for {j}", file=sys.stderr)
+            elif self.args.type == 'MicMac':
+                # MicMac format will be handled separately after collecting all GCPs
+                pass
             else:
                 if j in self.coords:
                     if len(self.gcp_found[j]) <= self.args.limit:
@@ -297,6 +343,11 @@ class GcpFind():
                         # .format( gcp[0], gcp[1], gcp[2], j))
                     else:
                         print(f"GCP {j} over limit it is dropped on image {gcp[2]}", file=sys.stderr)
+        
+        # Handle MicMac format separately
+        if self.args.type == 'MicMac':
+            self.gcp_output_micmac(foutput)
+        
         if self.args.output != sys.stdout:
             foutput.close()
 
@@ -330,9 +381,9 @@ def cmd_params(parser, params):
                         help=f'marker dictionary id, default={def_dict} (DICT_4X4_100)')
     parser.add_argument('-o', '--output', type=str, default=def_output,
                         help='name of output GCP list file, default stdout')
-    parser.add_argument('-t', '--type', choices=['ODM', 'VisualSfM', 'Meshroom'],
+    parser.add_argument('-t', '--type', choices=['ODM', 'VisualSfM', 'Meshroom', 'MicMac'],
                         default=def_type,
-                        help=f'target program ODM or VisualSfM, default {def_type}')
+                        help=f'target program ODM, VisualSfM, Meshroom or MicMac, default {def_type}')
     parser.add_argument('-i', '--input', type=str, default=def_input,
                         help=f'name of input GCP coordinate file, default {def_input}')
     parser.add_argument('-s', '--separator', type=str, default=def_separator,
