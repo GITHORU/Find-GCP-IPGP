@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: UTF-8 -*-
 """
-Script to merge multiple MicMac DicoAppuisFlottant XML files
+Script to merge multiple MicMac SetOfMesureAppuisFlottants XML files (S2D format)
 with optional filtering by point names (whitelist/blacklist)
 
 Usage:
@@ -13,13 +13,13 @@ import sys
 import os
 import argparse
 import xml.etree.ElementTree as ET
-from collections import OrderedDict
+from collections import defaultdict, OrderedDict
 
 def parse_xml_file(xml_file):
-    """Parse a MicMac DicoAppuisFlottant XML file
+    """Parse a MicMac SetOfMesureAppuisFlottants XML file (S2D format)
     
     :param xml_file: path to XML file
-    :return: dictionary of {NamePt: {'Pt': coords, 'Incertitude': incertitude}}
+    :return: dictionary of {image_name: {point_id: (x, y)}}
     """
     try:
         tree = ET.parse(xml_file)
@@ -31,33 +31,48 @@ def parse_xml_file(xml_file):
         print(f"File not found: {xml_file}", file=sys.stderr)
         return {}
     
-    if root.tag != 'DicoAppuisFlottant':
-        print(f"Warning: {xml_file} does not have DicoAppuisFlottant root element", file=sys.stderr)
+    if root.tag != 'SetOfMesureAppuisFlottants':
+        print(f"Warning: {xml_file} does not have SetOfMesureAppuisFlottants root element", file=sys.stderr)
         return {}
     
-    points = {}
-    for one_appui in root.findall('OneAppuisDAF'):
-        name_pt_elem = one_appui.find('NamePt')
-        pt_elem = one_appui.find('Pt')
-        incertitude_elem = one_appui.find('Incertitude')
-        
-        if name_pt_elem is None or pt_elem is None:
-            print(f"Warning: Invalid OneAppuisDAF in {xml_file}, skipping", file=sys.stderr)
+    images_data = defaultdict(dict)
+    
+    for image_elem in root.findall('MesureAppuiFlottant1Im'):
+        name_im_elem = image_elem.find('NameIm')
+        if name_im_elem is None:
+            print(f"Warning: Missing NameIm in {xml_file}, skipping image", file=sys.stderr)
             continue
         
-        name_pt = name_pt_elem.text
-        pt_coords = pt_elem.text
-        incertitude = incertitude_elem.text if incertitude_elem is not None else "1 1 1"
+        image_name = name_im_elem.text
         
-        if name_pt in points:
-            print(f"Warning: Duplicate point {name_pt} in {xml_file}, keeping first occurrence", file=sys.stderr)
-        else:
-            points[name_pt] = {
-                'Pt': pt_coords,
-                'Incertitude': incertitude
-            }
+        for measure_elem in image_elem.findall('OneMesureAF1I'):
+            name_pt_elem = measure_elem.find('NamePt')
+            pt_im_elem = measure_elem.find('PtIm')
+            
+            if name_pt_elem is None or pt_im_elem is None:
+                print(f"Warning: Invalid OneMesureAF1I in {xml_file} for image {image_name}, skipping", file=sys.stderr)
+                continue
+            
+            point_id = name_pt_elem.text
+            pt_coords = pt_im_elem.text.strip()
+            
+            # Parse coordinates (x y)
+            try:
+                coords = pt_coords.split()
+                if len(coords) >= 2:
+                    x = float(coords[0])
+                    y = float(coords[1])
+                    
+                    if point_id in images_data[image_name]:
+                        print(f"Warning: Duplicate point {point_id} in image {image_name} in {xml_file}, keeping first occurrence", file=sys.stderr)
+                    else:
+                        images_data[image_name][point_id] = (x, y)
+                else:
+                    print(f"Warning: Invalid coordinates format in {xml_file} for point {point_id} in image {image_name}", file=sys.stderr)
+            except ValueError:
+                print(f"Warning: Non-numerical coordinates in {xml_file} for point {point_id} in image {image_name}", file=sys.stderr)
     
-    return points
+    return dict(images_data)
 
 def merge_xml_files(xml_files, keep_list=None, exclude_list=None):
     """Merge multiple XML files into one dictionary
@@ -65,9 +80,9 @@ def merge_xml_files(xml_files, keep_list=None, exclude_list=None):
     :param xml_files: list of XML file paths
     :param keep_list: list of point names to keep (whitelist), None for all
     :param exclude_list: list of point names to exclude (blacklist), None for none
-    :return: merged dictionary of points
+    :return: merged dictionary of {image_name: {point_id: (x, y)}}
     """
-    all_points = OrderedDict()
+    all_images_data = defaultdict(dict)
     
     # Convert keep_list and exclude_list to sets for faster lookup
     keep_set = set(keep_list) if keep_list else None
@@ -78,43 +93,51 @@ def merge_xml_files(xml_files, keep_list=None, exclude_list=None):
             print(f"Warning: {xml_file} does not exist, skipping", file=sys.stderr)
             continue
         
-        points = parse_xml_file(xml_file)
+        images_data = parse_xml_file(xml_file)
         
-        for name_pt, data in points.items():
-            # Apply filters
-            if keep_set is not None and name_pt not in keep_set:
-                continue
-            if exclude_set is not None and name_pt in exclude_set:
-                continue
-            
-            # If point already exists, keep the first one (or could merge/average)
-            if name_pt in all_points:
-                print(f"Warning: Point {name_pt} already exists, keeping first occurrence", file=sys.stderr)
-            else:
-                all_points[name_pt] = data
+        for image_name, points in images_data.items():
+            for point_id, coords in points.items():
+                # Apply filters
+                if keep_set is not None and point_id not in keep_set:
+                    continue
+                if exclude_set is not None and point_id in exclude_set:
+                    continue
+                
+                # If point already exists in this image, keep the first one
+                if point_id in all_images_data[image_name]:
+                    print(f"Warning: Point {point_id} already exists in image {image_name}, keeping first occurrence", file=sys.stderr)
+                else:
+                    all_images_data[image_name][point_id] = coords
     
-    return all_points
+    return dict(all_images_data)
 
-def write_xml_output(points, output_file):
-    """Write merged points to XML file
+def write_xml_output(images_data, output_file):
+    """Write merged points to XML file (S2D format)
     
-    :param points: dictionary of points
+    :param images_data: dictionary of {image_name: {point_id: (x, y)}}
     :param output_file: output XML file path
     """
-    root = ET.Element('DicoAppuisFlottant')
+    root = ET.Element('SetOfMesureAppuisFlottants')
     
-    # Sort points by name for consistent output
-    for name_pt in sorted(points.keys()):
-        one_appui = ET.SubElement(root, 'OneAppuisDAF')
+    # Sort images by name for consistent output
+    for image_name in sorted(images_data.keys()):
+        image_elem = ET.SubElement(root, 'MesureAppuiFlottant1Im')
         
-        pt_elem = ET.SubElement(one_appui, 'Pt')
-        pt_elem.text = points[name_pt]['Pt']
+        name_im_elem = ET.SubElement(image_elem, 'NameIm')
+        name_im_elem.text = image_name
         
-        name_pt_elem = ET.SubElement(one_appui, 'NamePt')
-        name_pt_elem.text = name_pt
-        
-        incertitude_elem = ET.SubElement(one_appui, 'Incertitude')
-        incertitude_elem.text = points[name_pt]['Incertitude']
+        # Sort points by ID for consistent output
+        for point_id in sorted(images_data[image_name].keys(), key=lambda x: (len(x), x) if x.isdigit() else (999999, x)):
+            x, y = images_data[image_name][point_id]
+            
+            measure_elem = ET.SubElement(image_elem, 'OneMesureAF1I')
+            
+            name_pt_elem = ET.SubElement(measure_elem, 'NamePt')
+            name_pt_elem.text = str(point_id)
+            
+            pt_im_elem = ET.SubElement(measure_elem, 'PtIm')
+            # Format coordinates with high precision as in MicMac format
+            pt_im_elem.text = f"{x:.14f} {y:.14f}"
     
     tree = ET.ElementTree(root)
     ET.indent(tree, space="     ")
@@ -123,7 +146,9 @@ def write_xml_output(points, output_file):
         with open(output_file, 'w', encoding='utf-8') as f:
             f.write('<?xml version="1.0" ?>\n')
             tree.write(f, encoding='unicode', xml_declaration=False)
-        print(f"Successfully wrote {len(points)} points to {output_file}", file=sys.stderr)
+        
+        total_points = sum(len(points) for points in images_data.values())
+        print(f"Successfully wrote {len(images_data)} images with {total_points} total points to {output_file}", file=sys.stderr)
     except Exception as e:
         print(f"Error writing output file: {e}", file=sys.stderr)
         sys.exit(1)
@@ -140,7 +165,7 @@ def parse_list(list_str):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Merge multiple MicMac DicoAppuisFlottant XML files',
+        description='Merge multiple MicMac SetOfMesureAppuisFlottants XML files (S2D format)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -183,20 +208,22 @@ Examples:
             print(f"Exclude list: {exclude_list}", file=sys.stderr)
     
     # Merge XML files
-    merged_points = merge_xml_files(args.input_files, keep_list, exclude_list)
+    merged_images = merge_xml_files(args.input_files, keep_list, exclude_list)
     
-    if not merged_points:
-        print("No points to write. Check input files and filters.", file=sys.stderr)
+    if not merged_images:
+        print("No images or points to write. Check input files and filters.", file=sys.stderr)
         sys.exit(1)
     
     # Write output
-    write_xml_output(merged_points, args.output)
+    write_xml_output(merged_images, args.output)
     
     if args.verbose:
-        print(f"Merged {len(merged_points)} points:", file=sys.stderr)
-        for name_pt in sorted(merged_points.keys()):
-            print(f"  - {name_pt}", file=sys.stderr)
+        print(f"Merged {len(merged_images)} images:", file=sys.stderr)
+        for image_name in sorted(merged_images.keys()):
+            points = merged_images[image_name]
+            print(f"  - {image_name}: {len(points)} points", file=sys.stderr)
+            for point_id in sorted(points.keys()):
+                print(f"    * {point_id}", file=sys.stderr)
 
 if __name__ == "__main__":
     main()
-
